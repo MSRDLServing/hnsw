@@ -6,6 +6,11 @@
 #include <chrono>
 #include "hnswlib.h"
 
+#include <cassert>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 #include <unordered_set>
 using namespace std;
@@ -374,3 +379,226 @@ void sift_test1B() {
 
 
 }
+
+/*****************************************************
+ * I/O functions for fvecs and ivecs
+ *****************************************************/
+
+
+float * fvecs_read (const char *fname,
+                    size_t *d_out, size_t *n_out)
+{
+    FILE *f = fopen(fname, "r");
+    if(!f) {
+        fprintf(stderr, "could not open %s\n", fname);
+        perror("");
+        abort();
+    }
+    int d;
+    fread(&d, 1, sizeof(int), f);
+    assert((d > 0 && d < 1000000) || !"unreasonable dimension");
+    fseek(f, 0, SEEK_SET);
+    struct stat st;
+    fstat(fileno(f), &st);
+    size_t sz = st.st_size;
+    assert(sz % ((d + 1) * 4) == 0 || !"weird file size");
+    size_t n = sz / ((d + 1) * 4);
+
+    *d_out = d; *n_out = n;
+    float *x = new float[n * (d + 1)];
+    size_t nr = fread(x, sizeof(float), n * (d + 1), f);
+    assert(nr == n * (d + 1) || !"could not read whole file");
+
+    // shift array to remove row headers
+    for(size_t i = 0; i < n; i++)
+        memmove(x + i * d, x + 1 + i * (d + 1), d * sizeof(*x));
+
+    fclose(f);
+    return x;
+}
+
+int *ivecs_read(const char *fname, size_t *d_out, size_t *n_out)
+{
+    return (int*)fvecs_read(fname, d_out, n_out);
+}
+
+double elapsed ()
+{
+    struct timeval tv;
+    gettimeofday (&tv, nullptr);
+    return  tv.tv_sec + tv.tv_usec * 1e-6;
+}
+
+static void get_ground_truth(unsigned int *massQA, size_t vecsize, size_t qsize, L2Space &l2space, size_t vecdim, vector<std::priority_queue< std::pair< float, labeltype >>> &answers, size_t k) {
+
+
+	(vector<std::priority_queue< std::pair< float, labeltype >>>(qsize)).swap(answers);
+	DISTFUNC<float> fstdistfunc_ = l2space.get_dist_func();
+	cout << qsize << "\n";
+	for (int i = 0; i < qsize; i++) {
+		for (int j = 0; j <k; j++) {
+			answers[i].emplace(0.0f, massQA[k * i + j]);
+		}
+	}
+}
+
+float test_approx_custom(float *massQ, size_t vecsize, size_t qsize, HierarchicalNSW<float> &appr_alg, size_t vecdim, vector<std::priority_queue< std::pair< float, labeltype >>> &answers, size_t k) {
+    size_t correct = 0;
+    size_t total = 0;
+//#pragma omp parallel for
+    for (int i = 0; i < qsize; i++) {
+
+        std::priority_queue< std::pair< float, labeltype >> result = appr_alg.searchKnn(massQ + vecdim*i, 10);
+        std::priority_queue< std::pair< float, labeltype >> gt(answers[i]);
+        unordered_set <labeltype> g;
+        total += gt.size();
+        while (gt.size()) {
+            g.insert(gt.top().second);
+            gt.pop();
+        }
+        while (result.size()) {
+            if (g.find(result.top().second) != g.end())
+                correct++;
+            result.pop();
+        }
+    }
+    return 1.0f*correct / total;
+}
+
+void test_vs_recall_custom(float *massQ, size_t vecsize, size_t qsize, HierarchicalNSW<float> &appr_alg, size_t vecdim, vector<std::priority_queue< std::pair< float, labeltype >>> &answers,size_t k) {
+    //vector<size_t> efs = { 1,2,3,4,6,8,12,16,24,32,64,128,256,320 };//  = ; { 23 };
+    vector<size_t> efs;
+    for (int i = 10; i < 30; i++) {
+        efs.push_back(i);
+    }
+    for (int i = 100; i < 2000; i += 100) {
+        efs.push_back(i);
+    }
+    /*for (int i = 300; i <600; i += 20) {
+        efs.push_back(i);
+    }*/
+    for (size_t ef : efs)
+    {
+        appr_alg.setEf(ef);
+        StopW stopw = StopW();
+        appr_alg.dist_calc = 0;
+        float recall = test_approx_custom(massQ, vecsize, qsize, appr_alg, vecdim, answers,k);
+        float time_us_per_query = stopw.getElapsedTimeMicro() / qsize;
+        float avr_dist_count = appr_alg.dist_calc*1.f / qsize;
+        cout << ef<<"\t"<<recall << "\t" << time_us_per_query << " us\t" << avr_dist_count << " dcs\n";
+        if (recall > 1.0) {
+            cout << recall << "\t" << time_us_per_query<<" us\t"<< avr_dist_count <<" dcs\n";
+            break;
+        }
+    }
+}
+
+//void sift_test10k() {
+//
+//    double t0 = elapsed();
+//
+//	int subset_size_milllions = 0.01;
+//	int efConstruction = 40;
+//	int M = 16;
+//
+//	size_t vecsize = subset_size_milllions * 1000000;
+//
+//	size_t qsize = 100;
+//	size_t vecdim = 128;
+//	char path_index[1024];
+//	char path_gt[1024];
+//	char *path_q = "siftsmall/siftsmall_query.fvecs";
+//	char *path_data = "siftsmall/siftsmall_base.fvecs";
+//	sprintf(path_index, "siftsmall/siftsmall_%dm_ef_%d_M_%d.bin", subset_size_milllions, efConstruction, M);
+//
+//	sprintf(path_gt,"siftsmall/siftsmall_groundtruth.ivecs");
+//
+//	cout << "Loading GT:\n";
+////	ifstream inputGT(path_gt, ios::binary);
+////	unsigned int *massQA = new unsigned int[qsize * 1000];
+////	for (int i = 0; i < qsize; i++) {
+////		int t;
+////		inputGT.read((char *)&t, 4);
+////		inputGT.read((char *)(massQA + 1000 * i), t * 4);
+////		if (t != 1000) {
+////			cout << "err";
+////			return;
+////		}
+////	}
+//
+//    size_t k; // nb of results per query in the GT
+//    int *gt_int = ivecs_read("sift1M/sift_groundtruth.ivecs", &k, &qsize);
+//
+//    unsigned int *massQA = new unsigned int[k * qsize];
+//    for(int i = 0; i < k * qsize; i++) {
+//    	massQA[i] = gt_int[i];
+//    }
+//
+//	cout << "Loading queries:\n";
+////	unsigned char *massQ = new unsigned char[qsize * vecdim];
+////	ifstream inputQ(path_q, ios::binary);
+////
+////	for (int i = 0; i < qsize; i++) {
+////		int in = 0;
+////		inputQ.read((char *)&in, 4);
+////		if (in != 128)
+////		{
+////			cout << "file error";
+////			exit(1);
+////		}
+////		inputQ.read((char *)massb, in);
+////		for (int j = 0; j < vecdim; j++) {
+////			massQ[i*vecdim + j] = massb[j];
+////		}
+////
+////	}
+////	inputQ.close();
+//
+//    float *massQ = fvecs_read("sift1M/sift_query.fvecs", &vecdim, &qsize);
+//
+//	unsigned char *mass = new unsigned char[vecdim];
+//	ifstream input(path_data, ios::binary);
+//	int in = 0;
+//	L2Space l2space(vecdim);
+//
+//	HierarchicalNSW<float> *appr_alg;
+//	if (exists_test(path_index)) {
+//		cout << "Loading index from "<< path_index <<":\n";
+//		appr_alg=new HierarchicalNSW<float>(&l2space, path_index, false);
+//		cout << "Actual memory usage: " << getCurrentRSS() / 1000000 << " Mb \n";
+//	} else {
+//
+//        printf ("[%.3f s] Building index: \n", elapsed() - t0);
+//        float *massb = fvecs_read("sift1M/sift_learn.fvecs", &vecdim, &vecsize);
+//
+//		for (int j = 0; j < vecdim; j++) {
+//			mass[j] = massb[j] * (1.0f);
+//		}
+//
+//		appr_alg = new HierarchicalNSW<float>(&l2space, vecsize, M, efConstruction);
+//
+//		appr_alg->addPoint((void *)(massb), (size_t)0); // Insert the first point as the root.
+//		int j1 = 0;
+//		StopW stopw = StopW();
+//		StopW stopw_full = StopW();
+//		size_t report_every = 100000;
+//		for (int i = 1; i < vecsize; i++) {
+//			appr_alg->addPoint((void *)(massb + i * vecdim), (size_t)j1);
+//		}
+//		input.close();
+//		printf ("[%.3f s]Build time: \n", elapsed() - t0);
+// 		appr_alg->SaveIndex(path_index);
+//	}
+//
+//
+//	vector<std::priority_queue< std::pair< float, labeltype >>> answers;
+//	cout << "Parsing gt:\n";
+//	get_ground_truth(massQA, vecsize, qsize, l2space, vecdim, answers, k);
+//	cout << "Loaded gt\n";
+//	for (int i = 0; i < 1; i++)
+//		test_vs_recall_custom(massQ, vecsize, qsize, *appr_alg, vecdim, answers, k);
+//	cout << "Actual memory usage: " << getCurrentRSS() / 1000000 << " Mb \n";
+//	return;
+//
+//
+//}

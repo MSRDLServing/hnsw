@@ -6,6 +6,11 @@
 #include <chrono>
 #include "hnswlib.h"
 
+#include <cassert>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 #include <unordered_set>
 using namespace std;
@@ -66,7 +71,7 @@ float test_approx(float *massQ, size_t vecsize, size_t qsize, HierarchicalNSW<fl
 //#pragma omp parallel for
     for (int i = 0; i < qsize; i++) {
         
-        std::priority_queue< std::pair< float, labeltype >> result = appr_alg.searchKnn(massQ + vecdim*i, 10);
+        std::priority_queue< std::pair< float, labeltype >> result = appr_alg.searchKnn(massQ + vecdim*i, k);
         std::priority_queue< std::pair< float, labeltype >> gt(answers[i]);
         unordered_set <labeltype> g;
         total += gt.size();
@@ -289,4 +294,149 @@ void sift_test() {
 //    /*for(int i=0;i<1000;i++)
 //        cout << mass[i] << "\n";*/
 //        //("11", std::ios::binary);
+}
+
+/*****************************************************
+ * I/O functions for fvecs and ivecs
+ *****************************************************/
+
+
+float * fvecs_read (const char *fname,
+                    size_t *d_out, size_t *n_out)
+{
+    FILE *f = fopen(fname, "r");
+    if(!f) {
+        fprintf(stderr, "could not open %s\n", fname);
+        perror("");
+        abort();
+    }
+    int d;
+    fread(&d, 1, sizeof(int), f);
+    assert((d > 0 && d < 1000000) || !"unreasonable dimension");
+    fseek(f, 0, SEEK_SET);
+    struct stat st;
+    fstat(fileno(f), &st);
+    size_t sz = st.st_size;
+    assert(sz % ((d + 1) * 4) == 0 || !"weird file size");
+    size_t n = sz / ((d + 1) * 4);
+
+    *d_out = d; *n_out = n;
+    float *x = new float[n * (d + 1)];
+    size_t nr = fread(x, sizeof(float), n * (d + 1), f);
+    assert(nr == n * (d + 1) || !"could not read whole file");
+
+    // shift array to remove row headers
+    for(size_t i = 0; i < n; i++)
+        memmove(x + i * d, x + 1 + i * (d + 1), d * sizeof(*x));
+
+    fclose(f);
+    return x;
+}
+
+int *ivecs_read(const char *fname, size_t *d_out, size_t *n_out)
+{
+    return (int*)fvecs_read(fname, d_out, n_out);
+}
+
+double elapsed ()
+{
+    struct timeval tv;
+    gettimeofday (&tv, nullptr);
+    return  tv.tv_sec + tv.tv_usec * 1e-6;
+}
+
+void get_gt_custom(unsigned int *massQA, float *massQ, float *mass, size_t vecsize, size_t qsize, L2Space &l2space, size_t vecdim, vector<std::priority_queue< std::pair< float, labeltype >>> &answers, size_t k, size_t gt_k) {
+
+    //answers.swap(vector<std::priority_queue< std::pair< float, labeltype >>>(qsize));
+    (vector<std::priority_queue< std::pair< float, labeltype >>>(qsize)).swap(answers);
+    DISTFUNC<float> fstdistfunc_ = l2space.get_dist_func();
+    cout << qsize<<"\n";
+    for (int i = 0; i < qsize; i++) {
+        for (int j = 0; j <k; j++) {
+            float other = fstdistfunc_(massQ + i*vecdim, mass + massQA[gt_k * i + j] *vecdim, l2space.get_dist_func_param());
+            answers[i].emplace(other,massQA[gt_k*i+j]);
+        }
+    }
+}
+
+void sift10k_test() {
+    size_t vecsize = 10000;
+    size_t qsize = 100;
+    size_t vecdim = 128;
+
+	int efConstruction = 1000;
+	int M = 16;
+    size_t k = 32;
+
+    float *mass = fvecs_read("siftsmall/siftsmall_base.fvecs", &vecdim, &vecsize);
+
+    float *massQ = fvecs_read("siftsmall/siftsmall_query.fvecs", &vecdim, &qsize);
+
+    size_t gt_k;
+    int *gt_int = ivecs_read("siftsmall/siftsmall_groundtruth.ivecs", &gt_k, &qsize);
+    unsigned int *massQA = new unsigned int[gt_k * qsize];
+    for(int i = 0; i < gt_k * qsize; i++) {
+    	massQA[i] = gt_int[i];
+    }
+
+    int maxn = 16;
+
+    L2Space l2space(vecdim);
+    //BruteforceSearch <float>bs(&l2space, vecsize);
+    //for(int tr=1;tr<9;tr++)
+//#define LOAD_I
+#ifdef LOAD_I
+
+    HierarchicalNSW<float> appr_alg(&l2space, "hnswlib_sift",false);
+    //HierarchicalNSW<float> appr_alg(&l2space, "D:/stuff/hnsw_lib/nmslib/similarity_search/release/temp",true);
+    //HierarchicalNSW<float> appr_alg(&l2space, "/mnt/d/stuff/hnsw_lib/nmslib/similarity_search/release/temp", true);
+
+    //appr_alg_saved.SaveIndex("d:\\hnsw-index.bin");
+    //appr_alg_saved.LoadIndex("d:\\hnsw-index2.bin", &l2space);
+#else
+    //return;
+    //for (int u = 0; u < 10; u++) {
+   /* PROCESS_MEMORY_COUNTERS pmc;
+
+    GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc));
+    SIZE_T virtualMemUsedByMe = pmc.WorkingSetSize;
+
+    cout << virtualMemUsedByMe/1000/1000 << "\n";*/
+        //HierarchicalNSW<float> appr_alg(&l2space, vecsize, 6, 40);
+        HierarchicalNSW<float> appr_alg(&l2space, vecsize, M, efConstruction);
+
+        cout << "Building index\n";
+        StopW stopwb = StopW();
+        for (int i = 0; i < 1; i++) {
+            appr_alg.addPoint((void *)(mass + vecdim*i), (size_t)i);
+        }
+//#pragma omp parallel for
+        for (int i = 1; i < vecsize; i++) {
+            appr_alg.addPoint((void *)(mass + vecdim*i), (size_t)i);
+        }
+        /*GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc));
+        virtualMemUsedByMe = pmc.WorkingSetSize;
+        cout << virtualMemUsedByMe / 1000 / 1000 << "\n";*/
+        cout << "Index built, time=" << stopwb.getElapsedTimeMicro()*1e-6 << "\n";
+        //appr_alg.SaveIndex("hnswlib_sift");
+
+        //appr_alg.SaveIndex("d:\\hnsw-index2.bin");
+
+#endif
+
+    //get_knn_quality(massA, vecsize, maxn, appr_alg);
+    //return;
+
+        vector<std::priority_queue< std::pair< float, labeltype >>> answers;
+
+        cout << "Loading gt\n";
+        //get_gt(mass, massQ, vecsize, qsize, l2space, vecdim, answers,k);
+        get_gt_custom(massQA, massQ, mass, vecsize, qsize, l2space, vecdim, answers, k, gt_k);
+        cout << "Loaded gt\n";
+        for (int i = 0; i < 1; i++)
+            test_vs_recall(massQ, vecsize, qsize, appr_alg, vecdim, answers, k);
+        //cout << "opt:\n";
+        //appr_alg.opt = true;
+
+    return;
 }

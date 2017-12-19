@@ -26,7 +26,7 @@ namespace hnswlib {
     HierarchicalNSW(SpaceInterface<dist_t> *s) {
 
     }
-    HierarchicalNSW(SpaceInterface<dist_t> *s, const string &location, bool nmslib = false) {
+    HierarchicalNSW(SpaceInterface<dist_t> *s, const std::string &location, bool nmslib = false) {
       LoadIndex(location, s);
     }
     HierarchicalNSW(SpaceInterface<dist_t> *s, size_t maxElements, size_t M = 16, size_t efConstruction = 200) :
